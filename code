@@ -28,8 +28,10 @@ import moa.tasks.TaskMonitor;
  *
  * Extends the Dynamic Weighted Majority Algorithm to handle drift.
  * Uses multiple kinds of seed experts 
- * @author Muhammad Mobin (mimm1@student.le.ac.uk)
+ * @author Muhammad Mobin (mobin_ksa@yahoo.com)
  * @supervisor Dr. Leandro Minku (leandro.minku@leicester.ac.uk)
+ * @supervisor Dr. Frederic Stahl 
+
  */
 
 public class HDWM_conference extends AbstractClassifier implements MultiClassClassifier {

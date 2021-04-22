@@ -1,0 +1,412 @@
+package moa.classifiers.drift;
+
+import com.github.javacliparser.IntOption;
+
+import java.util.ArrayList;
+
+import com.github.javacliparser.FloatOption;
+
+import com.github.javacliparser.MultiChoiceOption;
+
+import weka.core.Utils;
+import com.github.javacliparser.ListOption;
+import com.github.javacliparser.Option;
+import com.yahoo.labs.samoa.instances.Instance;
+
+import moa.classifiers.AbstractClassifier;
+import moa.classifiers.Classifier;
+import moa.classifiers.MultiClassClassifier;
+import moa.classifiers.core.driftdetection.ChangeDetector;
+import moa.core.DoubleVector;
+import moa.core.Measurement;
+import moa.core.ObjectRepository;
+import moa.options.ClassOption;
+import moa.tasks.TaskMonitor;
+
+/**
+ * Hybrid majority Drift Detection algorithm.
+ *
+ * Extends the Dynamic Weighted Majority Algorithm to handle drift.
+ * Uses multiple kinds of seed experts 
+ * @author Muhammad Mobin (mimm1@student.le.ac.uk)
+ * @supervisor Dr. Leandro Minku (leandro.minku@leicester.ac.uk)
+ */
+
+public class HDWM_conference extends AbstractClassifier implements MultiClassClassifier {
+
+    /**
+	 * 
+	 */
+	private static final long serialVersionUID = 1L;
+
+	
+	public ListOption learnerListOption = new ListOption(
+            "experts",
+            'l',
+            "The experts to combine.",
+            new ClassOption("learner", ' ', "", Classifier.class,
+            "bayes.NaiveBayes"),
+            new Option[]{
+                new ClassOption("", ' ', "", Classifier.class,
+                "bayes.NaiveBayes"),
+                new ClassOption("", ' ', "", Classifier.class,
+                "trees.HoeffdingTree -l NB"),
+                new ClassOption("", ' ', "", Classifier.class,
+                "trees.HoeffdingTree -l NBAdaptive"),
+                new ClassOption("", ' ', "", Classifier.class, "trees.HoeffdingTree -l MC")},
+            ',');
+    
+	// Drift Handling option
+    public MultiChoiceOption handleDriftOption = new MultiChoiceOption(
+            "handleDrift", 'y', "Handle drift Option", new String[]{
+            		"P-Reset Learning", "Q- Replace weak experts with best one", "R-Do not reset"},
+            new String[]{"Reset Learner weights to 1. ",
+                "Do not change the weights","Do not reset"
+            }, 1);
+
+    public IntOption periodOption = new IntOption("period", 'p',
+            "Period between Learner removal, creation, and weight update.", 50,
+            1, Integer.MAX_VALUE);
+
+    public FloatOption betaOption = new FloatOption("beta", 'b',
+            "Factor to punish mistakes by.", 0.5, 0.0, 1.0);
+
+    public FloatOption thetaOption = new FloatOption("theta", 't',
+            "Minimum fraction of weight per model.", 0.01, 0.0, 1.0);
+
+    public IntOption maxexpertsOption = new IntOption("maxexperts", 'e',
+            "Maximum number of allowed experts.", 100, 2,
+            Integer.MAX_VALUE);
+    
+    public ClassOption driftDetectionOption = new ClassOption("driftDetectionMethod", 'd',
+            "Drift detection method to use.", ChangeDetector.class, "DDM");
+    
+	protected ArrayList<Classifier> experts = new ArrayList<>();
+	
+	protected ArrayList<ChangeDetector> ddm = new ArrayList<>();
+
+	protected ArrayList<Double> weights = new ArrayList<>();
+	protected ArrayList<Long> DriftLocation_local =new ArrayList<>();
+	protected ArrayList<Long> DriftLocation_global =new ArrayList<>();
+	
+    protected long epochs;
+    protected int bagSize;
+    
+    //Declaration of Drift Variable
+    
+    //Declaration of Drift Variable
+    protected ChangeDetector driftDetectionGlobal;
+    
+
+    protected String streamName;
+	int CorrectPredection=0;
+	protected int numberOfDrifts=0;
+	protected int numberOfWarning=0;
+	protected int bestLearnerIndex = 0;
+    
+    protected Classifier[] seedlearner;
+    
+ 
+    @Override
+    public void trainOnInstanceImpl(Instance inst) {
+    
+    this.epochs++;
+
+   // if (this.epochs == 81)
+    //System.out.println(this.epochs + " before drift " + weights);
+
+        double[] Pr = new double[inst.numClasses()];
+        
+        bestLearnerIndex = 0;
+
+        double maxWeight = 0.0;
+        double weakestExpertWeight = 1.0;
+        int weakestExpertIndex = -1;
+        boolean prediction = false;
+        
+        boolean driftstate = false ;
+          
+        // Loop over seeds
+       for (int i = 0; i < this.experts.size(); i++) {
+           boolean deleted = false;
+
+               double[] pr = this.experts.get(i).getVotesForInstance(inst);
+               int yHat = Utils.maxIndex(pr);
+               
+               if(this.epochs % this.periodOption.getValue() == 0)
+               {
+                   if ((yHat != (int) inst.classValue()))  
+                      this.weights.set(i, this.weights.get(i) * this.betaOption.getValue());
+                      
+              
+              } 	   
+               	    // delete learner's that has weight below theta and that does not belong to seed experts
+      			    if (weights.get(i) < this.thetaOption.getValue() && i > bagSize){
+      			    	 experts.remove(i);
+                         weights.remove(i);
+               		     ddm.remove(i);
+
+                         deleted = true;
+          	        }
+
+                // do not take prediction and do not add weight if the learner is deleted
+     	            if(!deleted){
+     	               Pr[yHat] += this.weights.get(i);
+     	               maxWeight = Math.max(maxWeight, this.weights.get(i));
+     	              if (this.weights.get(i) < weakestExpertWeight && i > bagSize) {
+     	                  weakestExpertIndex = i;
+     	                  weakestExpertWeight = weights.get(i);
+     	              }
+     	              
+     	               if ((yHat != (int) inst.classValue())) 
+     	                  prediction = false;                            
+     	               else      
+     	            	  prediction = true;
+     	               
+     	                    this.ddm.get(i).input(prediction ? 0.0 : 1.0);
+     	               
+     	               if (this.ddm.get(i).getChange() ) {
+     	            	  // numberOfDrifts++;
+
+     	            	   driftstate = true;
+
+     	            	   }
+     	               
+     	               
+     	               if (this.ddm.get(i).getWarningZone()  ) 
+
+     	            	     for (int j = 0; j < experts.size(); j++)
+     	            		         this.experts.get(j).trainOnInstance(inst);
+                 
+     	       } // deleted
+               
+        }
+        //Active Drift 
+       
+
+   	if (driftstate ==true && this.epochs % this.periodOption.getValue() == 0) 
+	 {  //
+        removeWeakestLearner(weakestExpertIndex);
+		int index = getIndexOfMin(weights);
+
+        for (int j = 0; j < bagSize; j++) {
+           // this.weights.set(j, 0.5);
+            //this.experts.get(j).resetLearning();
+        }
+        this.weights.set(index, 0.5);
+		// this.experts.get(index).resetLearning();
+
+	 }
+ 
+        
+        if (this.epochs % this.periodOption.getValue() == 0) {
+        	
+            //Global Prediction 
+            int yHat = Utils.maxIndex(Pr);
+          
+    	     if (yHat != (int) inst.classValue()) 
+    	         prediction = false;                            
+    	      else      
+    	   	  prediction = true;
+    	     
+    	     driftDetectionGlobal.input(prediction ? 0.0 : 1.0);
+    	     if (driftDetectionGlobal.getChange() ) 
+    	      	   numberOfDrifts++;
+    	     if (driftDetectionGlobal.getWarningZone() ) 
+    	    	 numberOfWarning++;
+    	    scaleWeights(maxWeight);
+    	    
+    	    if (yHat != (int) inst.classValue()) {                      
+                if (experts.size() >= this.maxexpertsOption.getValue() && experts.size() > bagSize) {
+                   removeWeakestLearner(weakestExpertIndex);
+                }
+                // add new learner when Global wrong prediction is detected
+                            
+                addLearner();
+  
+            }
+            
+          }
+        
+        for (Classifier expert : this.experts) {
+            expert.trainOnInstance(inst);
+        } 
+  
+    }
+    
+    public int getIndexOfMin(ArrayList<Double> data) {
+        float min = Float.MAX_VALUE;
+        int index = -1;
+        for (int i = 0; i < data.size(); i++) {
+            Double f = data.get(i);
+            if (Double.compare(f.floatValue(), min) < 0) {
+                min = f.floatValue();
+                index = i;
+            }
+        }
+        return index;
+    }
+    
+    @Override
+	public void prepareForUseImpl(TaskMonitor monitor,
+	            ObjectRepository repository) {
+    	
+		    
+		 
+		    Option[] ensembleBagOption = this.learnerListOption.getList();
+	        this.seedlearner = new Classifier[ensembleBagOption.length];
+            this.driftDetectionGlobal = ((ChangeDetector) getPreparedClassOption(this.driftDetectionOption)).copy();
+	            
+	          bagSize = ensembleBagOption.length;
+		      for (int i = 0; i < bagSize; i++) {
+	   	            this.seedlearner[i] = (Classifier) ((ClassOption) ensembleBagOption[i]).materializeObject(monitor, repository);
+
+	   	            weights.add(1.0);
+	   	            experts.add(seedlearner[i]);
+	   	    	   	            
+	   	        if (monitor.taskShouldAbort()) {
+	                return;
+	            }
+	   	        
+	            monitor.setCurrentActivity("Preparing learner " + (i + 1) + "...",
+	                    -1.0);
+	            this.seedlearner[i].prepareForUse(monitor, repository);
+	            if (monitor.taskShouldAbort()) {
+	                return;
+	            }
+		      }
+	        super.prepareForUseImpl(monitor, repository);
+	    }
+    @Override
+    public void resetLearningImpl() {
+    	 this.driftDetectionGlobal = ((ChangeDetector) getPreparedClassOption(this.driftDetectionOption)).copy();
+
+    	
+        this.experts = new ArrayList<>();
+    	this.ddm = new ArrayList<>();
+
+        this.weights = new ArrayList<>();
+    	
+    	 for (int i = 0; i < bagSize; i++) {
+    		   // Classifier classifier = (Classifier) seedlearner[i].copy();
+ 		        Classifier classifier = (Classifier) seedlearner[i].copy();
+
+    	        classifier.resetLearning();
+	            experts.add(classifier);
+	            ddm.add(((ChangeDetector) getPreparedClassOption(this.driftDetectionOption)).copy());
+	            weights.add(1.0);
+	           }
+    }
+    
+        protected void scaleWeights(double maxWeight) {
+            double sf = 1.0 / maxWeight;
+            for (int i = 0; i < weights.size(); i++) {
+                weights.set(i, weights.get(i) * sf);
+            }
+        
+    }
+
+    protected void removeWeakestLearner(int i) {
+    	
+
+    	if ( i>bagSize){
+        experts.remove(i);
+        weights.remove(i);
+        ddm.remove(i);
+    		 }
+    } 
+   
+
+	
+    protected  int bestLearner(ArrayList<Double> weights) {
+    	
+	  	Double largest = weights.get(0);
+        	for (int i = 1; i < weights.size(); i++) {
+              if ( weights.get(i) > largest ) 
+              {
+                  largest = weights.get(i);
+                  bestLearnerIndex = i;     
+                  }
+        	}
+    		
+    	  	return bestLearnerIndex;
+
+    }
+
+ 
+    //Add new Learner in the Ensemble and set weight to 1
+    // Parameter index is the location of the best learner  
+    protected void addLearner() {
+    
+    	  int index  = bestLearner(this.weights);
+    	
+    	 //get the classifier having maximum weight 
+          Classifier classifier = (Classifier) experts.get(index).copy();
+    	 // Classifier classifier = (Classifier) experts.get(index);
+          classifier.resetLearning();
+          this.experts.add(classifier );
+          ddm.add(((ChangeDetector) getPreparedClassOption(this.driftDetectionOption)).copy());
+          this.weights.add(0.5);
+    	 
+ }
+    
+    @Override
+    public boolean isRandomizable() {
+        return false;
+    }
+
+    @Override
+    public double[] getVotesForInstance(Instance inst) {
+    	//original WMA Code slightly modified in line 4, added this.thetaOption.getValue()
+        DoubleVector combinedVote = new DoubleVector();
+        if (this.trainingWeightSeenByModel > 0.0) {
+            for (int i = 0; i < this.experts.size(); i++) {
+                if (this.weights.get(i) > 0.0) {
+                    DoubleVector vote = new DoubleVector(this.experts.get(i).getVotesForInstance(inst));
+                    if (vote.sumOfValues() > 0.0) {
+                        vote.normalize();
+                        vote.scaleValues(this.weights.get(i));
+                        combinedVote.addValues(vote);
+                    }
+                }
+            }
+        }
+        return combinedVote.getArrayRef();
+    
+     }   
+
+    @Override
+    protected Measurement[] getModelMeasurementsImpl() {
+        Measurement[] measurements = null;
+        if (this.weights != null) {
+            measurements = new Measurement[3];
+            measurements[0] = new Measurement("members size", this.weights.size());
+            measurements[1] = new Measurement("Drifts detected", numberOfDrifts);
+            measurements[2] = new Measurement("Warnings detected", numberOfWarning);
+
+
+        }
+       
+       
+
+      	 // System.out.println("D " + numberOfDrifts );
+
+        return measurements;
+
+  
+    }
+
+        
+       // System.out.println(epochs +" "+ DriftLocation_local );
+        
+       // System.out.println("Drifts Locations Local : " + DriftLocation_local);
+       // System.out.println("Drifts Locations Global : " + DriftLocation_global);
+   
+
+    @Override
+    public void getModelDescription(StringBuilder out, int indent) {
+
+    }
+
+
+}
